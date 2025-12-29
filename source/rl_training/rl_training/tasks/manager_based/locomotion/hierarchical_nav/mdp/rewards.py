@@ -34,18 +34,36 @@ def progress_to_goal(
     asset: RigidObject = env.scene[asset_cfg.name]
     robot_pos = asset.data.root_pos_w[:, :2]
     goal_pos = env.command_manager.get_command(command_name)[:, :2]
+    
+    # Check for nan/inf values and replace with zeros
+    robot_pos = torch.where(torch.isfinite(robot_pos), robot_pos, torch.zeros_like(robot_pos))
+    goal_pos = torch.where(torch.isfinite(goal_pos), goal_pos, torch.zeros_like(goal_pos))
+    
     current_distance = torch.norm(robot_pos - goal_pos, dim=1)
+    # Clamp distance to avoid inf/nan
+    current_distance = torch.clamp(current_distance, min=0.0, max=1e6)
     
     # Get previous distance from environment (stored by environment)
     if hasattr(env, "_prev_distance_to_goal") and env._prev_distance_to_goal is not None:
         prev_distance = env._prev_distance_to_goal
+        # Ensure prev_distance is also finite
+        prev_distance = torch.where(torch.isfinite(prev_distance), prev_distance, current_distance)
         progress = prev_distance - current_distance
+        # Clamp progress to avoid extreme values
+        progress = torch.clamp(progress, min=-10.0, max=10.0)
     else:
         # First step, no progress yet
         progress = torch.zeros_like(current_distance)
     
-    # Store current distance for next step
-    env._prev_distance_to_goal = current_distance.clone()
+    # Store current distance for next step (ensure it's finite)
+    env._prev_distance_to_goal = torch.where(
+        torch.isfinite(current_distance), 
+        current_distance.clone(), 
+        torch.zeros_like(current_distance)
+    )
+    
+    # Final check: replace any nan/inf with zero
+    progress = torch.where(torch.isfinite(progress), progress, torch.zeros_like(progress))
     
     return progress
 
@@ -70,8 +88,19 @@ def goal_reached_bonus(
     asset: RigidObject = env.scene[asset_cfg.name]
     robot_pos = asset.data.root_pos_w[:, :2]
     goal_pos = env.command_manager.get_command(command_name)[:, :2]
+    
+    # Check for nan/inf values and replace with zeros
+    robot_pos = torch.where(torch.isfinite(robot_pos), robot_pos, torch.zeros_like(robot_pos))
+    goal_pos = torch.where(torch.isfinite(goal_pos), goal_pos, torch.zeros_like(goal_pos))
+    
     distance = torch.norm(robot_pos - goal_pos, dim=1)
+    # Clamp distance to avoid inf/nan
+    distance = torch.clamp(distance, min=0.0, max=1e6)
     reached = (distance < threshold).float()
+    
+    # Final check: replace any nan/inf with zero
+    reached = torch.where(torch.isfinite(reached), reached, torch.zeros_like(reached))
+    
     return reached
 
 
@@ -104,8 +133,19 @@ def timeout_penalty(
     asset: RigidObject = env.scene["robot"]
     robot_pos = asset.data.root_pos_w[:, :2]
     goal_pos = env.command_manager.get_command("goal_command")[:, :2]
+    
+    # Check for nan/inf values and replace with zeros
+    robot_pos = torch.where(torch.isfinite(robot_pos), robot_pos, torch.zeros_like(robot_pos))
+    goal_pos = torch.where(torch.isfinite(goal_pos), goal_pos, torch.zeros_like(goal_pos))
+    
     distance = torch.norm(robot_pos - goal_pos, dim=1)
+    # Clamp distance to avoid inf/nan
+    distance = torch.clamp(distance, min=0.0, max=1e6)
     goal_not_reached = (distance > 1.0).float()
     
     penalty = -near_timeout * goal_not_reached
+    
+    # Final check: replace any nan/inf with zero
+    penalty = torch.where(torch.isfinite(penalty), penalty, torch.zeros_like(penalty))
+    
     return penalty

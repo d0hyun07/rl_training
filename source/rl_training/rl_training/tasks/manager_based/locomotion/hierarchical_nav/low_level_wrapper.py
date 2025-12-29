@@ -596,6 +596,34 @@ class LowLevelPolicyWrapper(gym.Wrapper):
         else:
             info = {}
         
+        # Filter out or fix base velocity metrics that are not relevant for hierarchical navigation
+        # These metrics come from the low-level environment and may contain nan values
+        base_velocity_metrics = [
+            "Metrics/base_velocity/error_vel_xy",
+            "Metrics/base_velocity/error_vel_yaw",
+            "Metrics/base_velocity/error_vel_z",
+        ]
+        for metric_key in base_velocity_metrics:
+            if metric_key in info:
+                metric_value = info[metric_key]
+                # Replace nan/inf with 0.0 for these metrics (they're not used in hierarchical navigation)
+                if isinstance(metric_value, torch.Tensor):
+                    metric_value = torch.where(torch.isfinite(metric_value), metric_value, torch.zeros_like(metric_value))
+                    info[metric_key] = metric_value.mean().item() if metric_value.numel() > 0 else 0.0
+                elif isinstance(metric_value, (int, float)):
+                    if not (isinstance(metric_value, float) and (metric_value != metric_value or abs(metric_value) == float('inf'))):
+                        info[metric_key] = metric_value
+                    else:
+                        info[metric_key] = 0.0
+                else:
+                    # Try to convert to float and check for nan
+                    try:
+                        val = float(metric_value)
+                        if val != val or abs(val) == float('inf'):  # Check for nan or inf
+                            info[metric_key] = 0.0
+                    except (ValueError, TypeError):
+                        info[metric_key] = 0.0
+        
         # Add high-level metrics
         info["hierarchical/step_count"] = self.decimation
         
@@ -696,6 +724,9 @@ class LowLevelPolicyWrapper(gym.Wrapper):
                     total_reward = total_reward + reward
                 else:
                     total_reward = total_reward + reward
+        
+        # Final safety check: replace any nan/inf with zero
+        total_reward = torch.where(torch.isfinite(total_reward), total_reward, torch.zeros_like(total_reward))
         
         return total_reward
     

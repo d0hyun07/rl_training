@@ -27,7 +27,10 @@ def robot_position_2d(
         Robot position tensor of shape [num_envs, 2] (x, y)
     """
     asset: RigidObject = env.scene[asset_cfg.name]
-    return asset.data.root_pos_w[:, :2]
+    robot_pos = asset.data.root_pos_w[:, :2]
+    # Check for nan/inf values and replace with zeros
+    robot_pos = torch.where(torch.isfinite(robot_pos), robot_pos, torch.zeros_like(robot_pos))
+    return robot_pos
 
 
 def robot_heading(
@@ -45,12 +48,21 @@ def robot_heading(
     """
     asset: RigidObject = env.scene[asset_cfg.name]
     quat = asset.data.root_quat_w
+    
+    # Check for nan/inf values in quaternion
+    quat = torch.where(torch.isfinite(quat), quat, torch.tensor([1.0, 0.0, 0.0, 0.0], device=quat.device).expand_as(quat))
+    
     # Extract yaw from quaternion (w, x, y, z order in Isaac Lab)
     # Using formula: yaw = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
     yaw = torch.atan2(
         2 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
         1 - 2 * (quat[:, 2] ** 2 + quat[:, 3] ** 2)
     )
+    
+    # Clamp yaw to valid range and check for nan/inf
+    yaw = torch.clamp(yaw, min=-3.14159, max=3.14159)
+    yaw = torch.where(torch.isfinite(yaw), yaw, torch.zeros_like(yaw))
+    
     return yaw.unsqueeze(-1)
 
 
@@ -68,7 +80,10 @@ def goal_position_2d(
         Goal position tensor of shape [num_envs, 2] (x, y)
     """
     goal_cmd = env.command_manager.get_command(command_name)
-    return goal_cmd[:, :2]
+    goal_pos = goal_cmd[:, :2]
+    # Check for nan/inf values and replace with zeros
+    goal_pos = torch.where(torch.isfinite(goal_pos), goal_pos, torch.zeros_like(goal_pos))
+    return goal_pos
 
 
 def distance_to_goal(
@@ -89,7 +104,18 @@ def distance_to_goal(
     asset: RigidObject = env.scene[asset_cfg.name]
     robot_pos = asset.data.root_pos_w[:, :2]
     goal_pos = env.command_manager.get_command(command_name)[:, :2]
+    
+    # Check for nan/inf values and replace with zeros
+    robot_pos = torch.where(torch.isfinite(robot_pos), robot_pos, torch.zeros_like(robot_pos))
+    goal_pos = torch.where(torch.isfinite(goal_pos), goal_pos, torch.zeros_like(goal_pos))
+    
     distance = torch.norm(robot_pos - goal_pos, dim=1, keepdim=True)
+    # Clamp distance to avoid inf/nan
+    distance = torch.clamp(distance, min=0.0, max=1e6)
+    
+    # Final check: replace any nan/inf with zero
+    distance = torch.where(torch.isfinite(distance), distance, torch.zeros_like(distance))
+    
     return distance
 
 
@@ -111,8 +137,23 @@ def direction_to_goal(
     asset: RigidObject = env.scene[asset_cfg.name]
     robot_pos = asset.data.root_pos_w[:, :2]
     goal_pos = env.command_manager.get_command(command_name)[:, :2]
+    
+    # Check for nan/inf values and replace with zeros
+    robot_pos = torch.where(torch.isfinite(robot_pos), robot_pos, torch.zeros_like(robot_pos))
+    goal_pos = torch.where(torch.isfinite(goal_pos), goal_pos, torch.zeros_like(goal_pos))
+    
     direction = goal_pos - robot_pos
     distance = torch.norm(direction, dim=1, keepdim=True)
+    # Clamp distance to avoid inf/nan
+    distance = torch.clamp(distance, min=1e-8, max=1e6)
     # Normalize direction, avoid division by zero
-    direction_normalized = direction / torch.clamp(distance, min=1e-8)
+    direction_normalized = direction / distance
+    
+    # Final check: replace any nan/inf with zero
+    direction_normalized = torch.where(
+        torch.isfinite(direction_normalized), 
+        direction_normalized, 
+        torch.zeros_like(direction_normalized)
+    )
+    
     return direction_normalized
