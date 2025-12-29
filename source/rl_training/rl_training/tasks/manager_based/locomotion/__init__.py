@@ -12,3 +12,4 @@
 """Locomotion environments for legged robots."""
 
 from .velocity import *  # noqa
+from .hierarchical_nav import *  # noqa

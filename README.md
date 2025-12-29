@@ -169,6 +169,111 @@ Temporary USD files are generated in `/tmp/IsaacLab/usd_{date}_{time}_{random}` 
 rm -rf /tmp/IsaacLab/usd_*
 ```
 
+## Hierarchical Navigation Training
+
+### Overview
+
+Hierarchical navigation training uses a two-level architecture:
+- **High-level policy**: Learns to navigate to goals using velocity commands [vx, vy, vyaw]
+- **Low-level policy**: Pre-trained locomotion policy (frozen) that converts velocity commands to joint actions
+
+### Prerequisites
+
+Before training the hierarchical navigation policy, you need a pre-trained low-level locomotion policy checkpoint. Train a low-level policy first:
+
+```bash
+# Train low-level locomotion policy for Deeprobotics M20
+python scripts/reinforcement_learning/rsl_rl/train.py --task=Rough-Deeprobotics-M20-v0 --headless --num_envs 4096 --max_iterations 20000
+```
+
+The checkpoint will be saved in `logs/rsl_rl/deeprobotics_m20_rough/<run_name>/model_<iteration>.pt`
+
+### Testing the Hierarchical Navigation Environment
+
+Before training, you can test the hierarchical navigation environment setup:
+
+```bash
+# Test hierarchical navigation environment
+# Requires: --checkpoint pointing to a low-level policy checkpoint
+python scripts/reinforcement_learning/rsl_rl/test_hierarchical_nav.py \
+    --task=Rough-Deeprobotics-M20-v0 \
+    --headless \
+    --num_envs 4 \
+    --checkpoint logs/rsl_rl/deeprobotics_m20_rough/<run_name>/model_19999.pt
+```
+
+This will:
+- Load the frozen low-level policy
+- Create the hierarchical navigation environment
+- Run a few test steps with random actions
+- Verify that observations, rewards, and actions are working correctly
+
+### Training the Hierarchical Navigation Policy
+
+To train the hierarchical navigation policy:
+
+```bash
+# Train hierarchical navigation policy
+# Requires: --frozen_policy pointing to a low-level policy checkpoint
+python scripts/reinforcement_learning/rsl_rl/train_hierarchical.py \
+    --task=Hierarchical-Nav-Deeprobotics-M20-v0 \
+    --headless \
+    --num_envs 4096 \
+    --max_iterations 10000 \
+    --frozen_policy logs/rsl_rl/deeprobotics_m20_rough/<run_name>/model_19999.pt
+```
+
+**Arguments:**
+- `--task`: Must be `Hierarchical-Nav-Deeprobotics-M20-v0` for hierarchical navigation
+- `--frozen_policy`: **Required**. Path to the pre-trained low-level locomotion policy checkpoint
+- `--num_envs`: Number of parallel environments (default: 4096)
+- `--max_iterations`: Number of training iterations (default: 10000)
+- `--headless`: Run without GUI (required for headless servers)
+
+**Training outputs:**
+- Checkpoints: `logs/rsl_rl/hierarchical_nav/<run_name>/model_<iteration>.pt`
+- TensorBoard logs: `logs/rsl_rl/hierarchical_nav/<run_name>/events.out.tfevents.*`
+- Configuration files: `logs/rsl_rl/hierarchical_nav/<run_name>/params/`
+
+### Monitoring Training Progress
+
+**Option 1: TensorBoard (Recommended)**
+
+```bash
+# Start TensorBoard
+tensorboard --logdir=logs/rsl_rl/hierarchical_nav --port=6006
+
+# Open browser to http://localhost:6006
+```
+
+**Option 2: View Logs Script**
+
+```bash
+# View latest training logs
+python scripts/view_training_logs.py
+```
+
+**Key metrics to monitor:**
+- `Episode_Reward/progress_to_goal`: Should increase over time
+- `Episode_Reward/goal_reached_bonus`: Should increase as agent learns to reach goals
+- `Mean episode length`: Should increase as agent learns to navigate longer distances
+- `Loss/value_function`: Should decrease over time
+
+### Resuming Training
+
+To resume training from a checkpoint:
+
+```bash
+python scripts/reinforcement_learning/rsl_rl/train_hierarchical.py \
+    --task=Hierarchical-Nav-Deeprobotics-M20-v0 \
+    --headless \
+    --num_envs 4096 \
+    --frozen_policy logs/rsl_rl/deeprobotics_m20_rough/<run_name>/model_19999.pt \
+    --resume \
+    --load_run <hierarchical_run_name> \
+    --checkpoint model_<iteration>.pt
+```
+
 ## Acknowledgements
 
 The project uses some code from the following open-source code repositories:

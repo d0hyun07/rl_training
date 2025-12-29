@@ -21,6 +21,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import AdditiveUniformNoiseCfg as Unoise
 
 import rl_training.tasks.manager_based.locomotion.hierarchical_nav.mdp as mdp
+import rl_training.tasks.manager_based.locomotion.velocity.mdp as velocity_mdp
 
 
 @configclass
@@ -30,6 +31,12 @@ class CommandsCfg:
     goal_position = mdp.UniformGoalPositionCommandCfg(
         distance_range=(1.0, 5.0),
         resampling_time_range=(20.0, 20.0),
+    )
+    # Add base_velocity command for frozen low-level policy
+    # This is needed by FrozenLocomotionPolicy to convert velocity commands to joint actions
+    base_velocity = velocity_mdp.UniformVelocityCommandCfg(
+        asset_name="robot",
+        resampling_time_range=(1e10, 1e10),  # Don't auto-resample (set by frozen policy)
     )
 
 

@@ -1,12 +1,9 @@
 # Copyright (c) 2025 Deep Robotics
 # SPDX-License-Identifier: BSD 3-Clause
 
-"""Observation functions for hierarchical navigation environment."""
-
 from __future__ import annotations
 
 import torch
-import math
 from typing import TYPE_CHECKING
 
 from isaaclab.assets import RigidObject
@@ -30,15 +27,14 @@ def robot_position_2d(
         Robot position tensor of shape [num_envs, 2] (x, y)
     """
     asset: RigidObject = env.scene[asset_cfg.name]
-    pos_w = asset.data.root_pos_w
-    return pos_w[:, :2]
+    return asset.data.root_pos_w[:, :2]
 
 
-def robot_yaw(
+def robot_heading(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Robot yaw angle in world frame.
+    """Robot heading (yaw) angle in world frame.
     
     Args:
         env: The environment instance
@@ -49,21 +45,24 @@ def robot_yaw(
     """
     asset: RigidObject = env.scene[asset_cfg.name]
     quat = asset.data.root_quat_w
-    # Extract yaw from quaternion (w, x, y, z)
-    qw, qx, qy, qz = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-    yaw = torch.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+    # Extract yaw from quaternion (w, x, y, z order in Isaac Lab)
+    # Using formula: yaw = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
+    yaw = torch.atan2(
+        2 * (quat[:, 0] * quat[:, 3] + quat[:, 1] * quat[:, 2]),
+        1 - 2 * (quat[:, 2] ** 2 + quat[:, 3] ** 2)
+    )
     return yaw.unsqueeze(-1)
 
 
 def goal_position_2d(
     env: ManagerBasedRLEnv,
-    command_name: str = "goal_position",
+    command_name: str = "goal_command",
 ) -> torch.Tensor:
     """Goal position in 2D (x, y) in world frame.
     
     Args:
         env: The environment instance
-        command_name: Name of the command term for goal position
+        command_name: Name of the goal command
         
     Returns:
         Goal position tensor of shape [num_envs, 2] (x, y)
@@ -75,80 +74,45 @@ def goal_position_2d(
 def distance_to_goal(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    command_name: str = "goal_position",
+    command_name: str = "goal_command",
 ) -> torch.Tensor:
-    """Distance to goal in 2D plane.
+    """Distance from robot to goal.
     
     Args:
         env: The environment instance
         asset_cfg: Configuration for the robot asset
-        command_name: Name of the command term for goal position
+        command_name: Name of the goal command
         
     Returns:
-        Distance tensor of shape [num_envs, 1]
+        Distance tensor of shape [num_envs, 1] (meters)
     """
-    robot_pos = robot_position_2d(env, asset_cfg)
-    goal_pos = goal_position_2d(env, command_name)
-    distance = torch.norm(goal_pos - robot_pos, dim=1, keepdim=True)
+    asset: RigidObject = env.scene[asset_cfg.name]
+    robot_pos = asset.data.root_pos_w[:, :2]
+    goal_pos = env.command_manager.get_command(command_name)[:, :2]
+    distance = torch.norm(robot_pos - goal_pos, dim=1, keepdim=True)
     return distance
 
 
 def direction_to_goal(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    command_name: str = "goal_position",
+    command_name: str = "goal_command",
 ) -> torch.Tensor:
-    """Direction to goal in robot frame (cos, sin).
+    """Normalized direction vector from robot to goal.
     
     Args:
         env: The environment instance
         asset_cfg: Configuration for the robot asset
-        command_name: Name of the command term for goal position
+        command_name: Name of the goal command
         
     Returns:
-        Direction tensor of shape [num_envs, 2] (cos, sin) in robot frame
+        Direction tensor of shape [num_envs, 2] (normalized vector)
     """
     asset: RigidObject = env.scene[asset_cfg.name]
-    robot_pos = robot_position_2d(env, asset_cfg)
-    goal_pos = goal_position_2d(env, command_name)
-    # Extract yaw from quaternion (w, x, y, z)
-    quat = asset.data.root_quat_w
-    qw, qx, qy, qz = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
-    robot_yaw_val = torch.atan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
-    
-    # Vector from robot to goal in world frame
-    direction_w = goal_pos - robot_pos
-    distance = torch.norm(direction_w, dim=1, keepdim=True)
-    
-    # Avoid division by zero
-    direction_w = direction_w / torch.clamp(distance, min=1e-6)
-    
-    # Rotate to robot frame
-    cos_yaw = torch.cos(robot_yaw_val)
-    sin_yaw = torch.sin(robot_yaw_val)
-    direction_x = direction_w[:, 0:1] * cos_yaw + direction_w[:, 1:2] * sin_yaw
-    direction_y = -direction_w[:, 0:1] * sin_yaw + direction_w[:, 1:2] * cos_yaw
-    
-    return torch.cat([direction_x, direction_y], dim=1)
-
-
-def goal_reached(
-    env: ManagerBasedRLEnv,
-    threshold: float = 0.5,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    command_name: str = "goal_position",
-) -> torch.Tensor:
-    """Check if goal is reached (distance < threshold).
-    
-    Args:
-        env: The environment instance
-        threshold: Distance threshold for goal reaching
-        asset_cfg: Configuration for the robot asset
-        command_name: Name of the command term for goal position
-        
-    Returns:
-        Boolean tensor of shape [num_envs] indicating goal reached
-    """
-    distance = distance_to_goal(env, asset_cfg, command_name)
-    return (distance.squeeze(-1) < threshold).bool()
-
+    robot_pos = asset.data.root_pos_w[:, :2]
+    goal_pos = env.command_manager.get_command(command_name)[:, :2]
+    direction = goal_pos - robot_pos
+    distance = torch.norm(direction, dim=1, keepdim=True)
+    # Normalize direction, avoid division by zero
+    direction_normalized = direction / torch.clamp(distance, min=1e-8)
+    return direction_normalized

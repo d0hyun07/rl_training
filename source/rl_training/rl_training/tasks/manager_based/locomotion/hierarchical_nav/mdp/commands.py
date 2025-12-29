@@ -1,32 +1,41 @@
 # Copyright (c) 2025 Deep Robotics
 # SPDX-License-Identifier: BSD 3-Clause
 
-"""Command functions for hierarchical navigation environment."""
-
 from __future__ import annotations
 
+import math
 import torch
 from typing import TYPE_CHECKING, Sequence
 
 from isaaclab.managers import CommandTerm, CommandTermCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.math import wrap_to_pi
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
 
-class UniformGoalPositionCommand(CommandTerm):
-    """Command generator that generates goal positions uniformly in a circular area."""
+class GoalCommand(CommandTerm):
+    """Command generator that generates goal positions with curriculum learning.
 
-    cfg: "UniformGoalPositionCommandCfg"
+    This command generator creates random goal positions around the robot.
+    The distance range changes based on the curriculum phase.
+    """
+
+    cfg: "GoalCommandCfg"
     """The configuration of the command generator."""
 
-    def __init__(self, cfg: "UniformGoalPositionCommandCfg", env: ManagerBasedEnv):
-        """Initialize the command generator."""
+    def __init__(self, cfg: "GoalCommandCfg", env: ManagerBasedEnv):
+        """Initialize the command generator.
+        
+        Args:
+            cfg: The configuration of the command generator.
+            env: The environment object.
+        """
         super().__init__(cfg, env)
         # Command is [goal_x, goal_y] in world frame
         self._command = torch.zeros(self.num_envs, 2, device=self.device)
+        # Curriculum phase: 0=Phase 1, 1=Phase 2, 2=Phase 3
+        self.curriculum_phase = 0
 
     @property
     def command(self) -> torch.Tensor:
@@ -44,33 +53,44 @@ class UniformGoalPositionCommand(CommandTerm):
         pass
 
     def _resample_command(self, env_ids: Sequence[int]):
-        """Resample goal positions for specified environments."""
+        """Resample goal positions for specified environments.
+        
+        Args:
+            env_ids: Environment IDs to resample commands for.
+        """
+        # Get distance range based on curriculum phase
+        if self.curriculum_phase == 0:
+            # Phase 1: 1-3m
+            min_dist, max_dist = 1.0, 3.0
+        elif self.curriculum_phase == 1:
+            # Phase 2: 3-7m
+            min_dist, max_dist = 3.0, 7.0
+        else:
+            # Phase 3: 5-10m
+            min_dist, max_dist = 5.0, 10.0
+
         # Sample distance and angle
-        distance = torch.empty(len(env_ids), device=self.device).uniform_(
-            self.cfg.distance_range[0], self.cfg.distance_range[1]
-        )
-        angle = torch.empty(len(env_ids), device=self.device).uniform_(
-            -torch.pi, torch.pi
-        )
-        
+        num_envs = len(env_ids)
+        distances = torch.rand(num_envs, device=self.device) * (max_dist - min_dist) + min_dist
+        angles = torch.rand(num_envs, device=self.device) * 2 * math.pi
+
         # Get robot position
-        robot_pos = self.env.scene["robot"].data.root_pos_w[env_ids, :2]
-        
+        # CommandTerm stores environment as self._env
+        robot_pos = self._env.scene["robot"].data.root_pos_w[env_ids, :2]
+
         # Compute goal position
-        goal_x = robot_pos[:, 0] + distance * torch.cos(angle)
-        goal_y = robot_pos[:, 1] + distance * torch.sin(angle)
-        
+        goal_x = robot_pos[:, 0] + distances * torch.cos(angles)
+        goal_y = robot_pos[:, 1] + distances * torch.sin(angles)
+
+        # Store goal positions
         self._command[env_ids, 0] = goal_x
         self._command[env_ids, 1] = goal_y
 
 
 @configclass
-class UniformGoalPositionCommandCfg(CommandTermCfg):
-    """Configuration for uniform goal position command generator."""
+class GoalCommandCfg(CommandTermCfg):
+    """Configuration for goal position command generator."""
 
-    class_type: type = UniformGoalPositionCommand
-    
-    distance_range: tuple[float, float] = (1.0, 5.0)
-    """Range of distances from robot to goal (min, max) in meters."""
-
-
+    class_type: type = GoalCommand
+    resampling_time_range: tuple[float, float] = (1e10, 1e10)
+    """The range of time to resample the command in seconds. Set to large values to prevent automatic resampling."""
