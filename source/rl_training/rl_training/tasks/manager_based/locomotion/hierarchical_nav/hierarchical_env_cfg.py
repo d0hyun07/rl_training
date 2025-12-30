@@ -29,6 +29,8 @@ class HierarchicalNavCommandsCfg:
 
     goal_command = mdp.GoalCommandCfg(
         resampling_time_range=(1e10, 1e10),  # Only resample on reset
+        # Note: Distance range is controlled by curriculum_phase in GoalCommand class
+        # Phase 0: 0.5-2m, Phase 1: 1.5-4m, Phase 2: 3-8m
     )
     # Add base_velocity command for frozen low-level policy
     # This is needed by FrozenLocomotionPolicy to convert velocity commands to joint actions
@@ -136,14 +138,15 @@ class HierarchicalNavRewardsCfg:
     """
 
     # High-level goal-reaching rewards
+    # Increased weights to provide stronger learning signal
     progress_to_goal = RewTerm(
         func=mdp.progress_to_goal,
-        weight=10.0,
+        weight=20.0,  # Increased from 10.0 to provide stronger progress signal
     )
     goal_reached_bonus = RewTerm(
         func=mdp.goal_reached_bonus,
-        weight=100.0,
-        params={"threshold": 1.0},
+        weight=200.0,  # Increased from 100.0 for stronger goal-reaching incentive
+        params={"threshold": 0.5},  # Reduced from 1.0m to 0.5m for easier learning
     )
     timeout_penalty = RewTerm(
         func=mdp.timeout_penalty,
@@ -204,35 +207,27 @@ class HierarchicalNavEnvCfg(DeeproboticsM20RoughEnvCfg):
         # Call parent post_init to set up scene, robot, etc.
         # This will fail when trying to modify observations, but we'll handle that
         try:
-            print("[DEBUG] Calling parent __post_init__...")
             super().__post_init__()
-            print("[DEBUG] Parent __post_init__ completed successfully")
         except (AttributeError, ValueError) as e:
             # Parent's __post_init__ tries to access observation terms (like joint_pos)
             # that don't exist in our high-level config. This is expected.
             # We'll restore our high-level configs after.
             error_str = str(e)
-            print(f"[DEBUG] Parent __post_init__ raised expected error: {error_str[:200]}")
             if any(keyword in error_str for keyword in ["observations", "joint_pos", "policy", "Not all regular expressions"]):
                 # This is expected - parent tries to modify low-level observations
                 # that we've replaced with high-level ones, or actions with empty joint names
-                print("[DEBUG] Error is expected, continuing...")
                 pass
             else:
                 # Re-raise if it's a different error
-                print(f"[DEBUG] Unexpected error, re-raising...")
                 raise
         except Exception as e:
             # Catch any other exceptions that might occur
             error_str = str(e)
-            print(f"[DEBUG] Parent __post_init__ raised unexpected error: {error_str[:200]}")
             if any(keyword in error_str for keyword in ["observations", "joint_pos", "policy", "Not all regular expressions", "body_names", "sensor_cfg"]):
                 # These are also expected errors related to config mismatches
-                print("[DEBUG] Error is related to config mismatch, continuing...")
                 pass
             else:
                 # Re-raise if it's a different error
-                print(f"[DEBUG] Unexpected error type, re-raising...")
                 raise
 
         # Restore our high-level configs (they were overridden by parent)

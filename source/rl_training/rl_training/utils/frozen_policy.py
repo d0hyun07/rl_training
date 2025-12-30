@@ -95,6 +95,8 @@ class FrozenLocomotionPolicy:
         This method temporarily sets the velocity command in the environment,
         gets the observation, and returns the policy actions.
         
+        OPTIMIZATION: Uses torch.inference_mode() for faster inference.
+        
         Args:
             velocity_command: Velocity command tensor of shape [num_envs, 3]
                 where columns are [vx, vy, vyaw]
@@ -102,8 +104,10 @@ class FrozenLocomotionPolicy:
         Returns:
             Joint actions tensor of shape [num_envs, num_joints]
         """
-        # Get the command term
-        cmd_term = self.env.command_manager.get_term("base_velocity")
+        # OPTIMIZATION: Use inference_mode for faster inference (faster than no_grad)
+        with torch.inference_mode():
+            # Get the command term
+            cmd_term = self.env.command_manager.get_term("base_velocity")
         
         # UniformVelocityCommand uses vel_command_b attribute
         # Store original command for restoration
@@ -269,7 +273,8 @@ class FrozenLocomotionPolicy:
             obs = TensorDict({"policy": policy_obs}, batch_size=[policy_obs.shape[0]])
         
         # Get actions from frozen policy
-        with torch.no_grad():
+        # OPTIMIZATION: Use inference_mode instead of no_grad for faster inference
+        with torch.inference_mode():
             actions = self.inference_policy(obs)
         
         # Restore original command

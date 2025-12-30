@@ -330,11 +330,12 @@ class LowLevelPolicyWrapper(gym.Wrapper):
                 object.__setattr__(self, '_critic_obs_dim', critic_obs_dim)  # For critic
                 object.__setattr__(self, '_max_episode_length', 1000)
                 object.__setattr__(self, '_is_closed', False)  # For __del__ compatibility
-                # Add command_manager, reward_manager, termination_manager, and curriculum_manager to prevent AttributeError in __del__
+                # Add command_manager, reward_manager, termination_manager, curriculum_manager, and viewport_camera_controller to prevent AttributeError in __del__
                 object.__setattr__(self, 'command_manager', None)
                 object.__setattr__(self, 'reward_manager', None)
                 object.__setattr__(self, 'termination_manager', None)
                 object.__setattr__(self, 'curriculum_manager', None)
+                object.__setattr__(self, 'viewport_camera_controller', None)  # For ManagerBasedEnv.close() compatibility
                 
                 # Create dummy action space (required by RslRlVecEnvWrapper)
                 object.__setattr__(self, 'single_action_space', gym.spaces.Box(
@@ -554,34 +555,36 @@ class LowLevelPolicyWrapper(gym.Wrapper):
         
         # Step high-level environment decimation times
         # Each step: convert velocity command to joint actions using frozen policy
+        # OPTIMIZATION: Use torch.inference_mode() for faster inference
         last_info = None
-        for step_idx in range(self.decimation):
-            # Convert high-level velocity command to low-level joint actions
-            low_level_actions = self.frozen_policy_wrapper(action)
-            
-            # Step high-level environment with joint actions
-            # The hierarchical environment expects joint actions (from base class)
-            step_result = self.env.step(low_level_actions)
-            
-            # Handle different return formats (gymnasium vs custom)
-            if len(step_result) == 4:
-                obs, reward, terminated, truncated = step_result
-                info = {}
-            elif len(step_result) == 5:
-                obs, reward, terminated, truncated, info = step_result
-            else:
-                raise ValueError(f"Unexpected step return format: {len(step_result)} values")
-            
-            # Store info from last step
-            last_info = info
-            
-            # Early termination check: if all environments are done, break early
-            if isinstance(terminated, torch.Tensor):
-                if terminated.all():
-                    break
-            elif isinstance(terminated, (bool, np.ndarray)):
-                if np.all(terminated):
-                    break
+        with torch.inference_mode():
+            for step_idx in range(self.decimation):
+                # Convert high-level velocity command to low-level joint actions
+                low_level_actions = self.frozen_policy_wrapper(action)
+                
+                # Step high-level environment with joint actions
+                # The hierarchical environment expects joint actions (from base class)
+                step_result = self.env.step(low_level_actions)
+                
+                # Handle different return formats (gymnasium vs custom)
+                if len(step_result) == 4:
+                    obs, reward, terminated, truncated = step_result
+                    info = {}
+                elif len(step_result) == 5:
+                    obs, reward, terminated, truncated, info = step_result
+                else:
+                    raise ValueError(f"Unexpected step return format: {len(step_result)} values")
+                
+                # Store info from last step
+                last_info = info
+                
+                # Early termination check: if all environments are done, break early
+                if isinstance(terminated, torch.Tensor):
+                    if terminated.all():
+                        break
+                elif isinstance(terminated, (bool, np.ndarray)):
+                    if np.all(terminated):
+                        break
         
         # Get high-level observations and rewards
         high_level_obs = self._get_high_level_obs()
@@ -598,6 +601,7 @@ class LowLevelPolicyWrapper(gym.Wrapper):
         
         # Filter out or fix base velocity metrics that are not relevant for hierarchical navigation
         # These metrics come from the low-level environment and may contain nan values
+        # In hierarchical navigation, we don't track base velocity errors since the low-level policy handles that
         base_velocity_metrics = [
             "Metrics/base_velocity/error_vel_xy",
             "Metrics/base_velocity/error_vel_yaw",
@@ -611,21 +615,34 @@ class LowLevelPolicyWrapper(gym.Wrapper):
                     metric_value = torch.where(torch.isfinite(metric_value), metric_value, torch.zeros_like(metric_value))
                     info[metric_key] = metric_value.mean().item() if metric_value.numel() > 0 else 0.0
                 elif isinstance(metric_value, (int, float)):
-                    if not (isinstance(metric_value, float) and (metric_value != metric_value or abs(metric_value) == float('inf'))):
-                        info[metric_key] = metric_value
-                    else:
+                    # Check for nan or inf
+                    if isinstance(metric_value, float) and (metric_value != metric_value or abs(metric_value) == float('inf')):
                         info[metric_key] = 0.0
+                    else:
+                        info[metric_key] = metric_value
                 else:
                     # Try to convert to float and check for nan
                     try:
                         val = float(metric_value)
                         if val != val or abs(val) == float('inf'):  # Check for nan or inf
                             info[metric_key] = 0.0
+                        else:
+                            info[metric_key] = val
                     except (ValueError, TypeError):
                         info[metric_key] = 0.0
+            else:
+                # Set to 0.0 if not present (to avoid nan in logs)
+                info[metric_key] = 0.0
         
         # Add high-level metrics
         info["hierarchical/step_count"] = self.decimation
+        
+        # Track goal reached for curriculum learning
+        # Store goal_reached status in info so GoalCommand can track it
+        unwrapped_env = self.env.unwrapped if hasattr(self.env, 'unwrapped') else self.env
+        distance = mdp.distance_to_goal(unwrapped_env).squeeze(-1)  # [num_envs]
+        goal_reached = (distance < 0.5)  # 0.5m threshold
+        info["hierarchical/goal_reached"] = goal_reached  # Store as tensor for curriculum tracking
         
         # RslRlVecEnvWrapper expects TensorDict for observations
         # Convert observation to TensorDict format
@@ -747,7 +764,7 @@ class LowLevelPolicyWrapper(gym.Wrapper):
         # Check if goal is reached
         unwrapped_env = self.env.unwrapped if hasattr(self.env, 'unwrapped') else self.env
         distance = mdp.distance_to_goal(unwrapped_env).squeeze(-1)  # [num_envs]
-        goal_reached = (distance < 1.0)  # threshold from goal_reached_bonus
+        goal_reached = (distance < 0.5)  # threshold reduced to 0.5m (matching goal_reached_bonus)
         
         # High-level termination: goal reached or low-level terminated
         high_level_terminated = goal_reached | terminated.bool()

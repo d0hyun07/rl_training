@@ -36,6 +36,13 @@ class GoalCommand(CommandTerm):
         self._command = torch.zeros(self.num_envs, 2, device=self.device)
         # Curriculum phase: 0=Phase 1, 1=Phase 2, 2=Phase 3
         self.curriculum_phase = 0
+        # Track goal reached success rate for curriculum learning
+        self._goal_reached_count = 0
+        self._total_episodes = 0
+        self._curriculum_update_interval = 500  # Update curriculum every 500 episodes (increased for stability)
+        # Success rate thresholds for advancing curriculum: 0.5 (50%), 0.7 (70%)
+        # Increased thresholds to prevent premature curriculum advancement
+        self._curriculum_thresholds = [0.5, 0.7]
 
     @property
     def command(self) -> torch.Tensor:
@@ -48,9 +55,31 @@ class GoalCommand(CommandTerm):
         pass
 
     def _update_metrics(self):
-        """Update metrics for the command generator."""
-        # No metrics to update for goal position commands
-        pass
+        """Update metrics for the command generator and update curriculum."""
+        # Update curriculum based on goal reached success rate
+        # Only update if we have enough episodes tracked
+        if self._total_episodes >= self._curriculum_update_interval:
+            if self._total_episodes > 0:
+                success_rate = self._goal_reached_count / self._total_episodes
+                
+                # Clamp success rate to [0, 1] to prevent >100% values
+                success_rate = min(1.0, max(0.0, success_rate))
+                
+                # Advance curriculum phase if success rate is high enough
+                if self.curriculum_phase < len(self._curriculum_thresholds):
+                    if success_rate >= self._curriculum_thresholds[self.curriculum_phase]:
+                        old_phase = self.curriculum_phase
+                        self.curriculum_phase += 1
+                        print(f"[CURRICULUM] Advancing from phase {old_phase + 1} to phase {self.curriculum_phase + 1} "
+                              f"(success rate: {success_rate:.2%}, episodes: {self._total_episodes})")
+                    else:
+                        print(f"[CURRICULUM] Phase {self.curriculum_phase + 1} progress: "
+                              f"{success_rate:.2%} / {self._curriculum_thresholds[self.curriculum_phase]:.2%} "
+                              f"(episodes: {self._total_episodes})")
+                
+                # Reset counters
+                self._goal_reached_count = 0
+                self._total_episodes = 0
 
     def _resample_command(self, env_ids: Sequence[int]):
         """Resample goal positions for specified environments.
@@ -58,16 +87,34 @@ class GoalCommand(CommandTerm):
         Args:
             env_ids: Environment IDs to resample commands for.
         """
+        # Track goal reached status when episodes reset
+        # _resample_command is called when episodes reset, so we check if goal was reached
+        # before resampling by checking the current distance to goal
+        try:
+            if hasattr(self._env, "scene") and "robot" in self._env.scene:
+                robot = self._env.scene["robot"]
+                robot_pos = robot.data.root_pos_w[env_ids, :2]
+                goal_pos = self._command[env_ids, :2]
+                distances = torch.norm(robot_pos - goal_pos, dim=1)
+                goal_reached = (distances < 0.5).sum().item()  # 0.5m threshold
+                self._goal_reached_count += goal_reached
+                self._total_episodes += len(env_ids)
+        except (AttributeError, KeyError, TypeError):
+            # If scene or robot doesn't exist, skip tracking (e.g., during initialization)
+            # Still count episodes to avoid undercounting
+            self._total_episodes += len(env_ids)
+        
         # Get distance range based on curriculum phase
+        # Start with closer goals for easier learning
         if self.curriculum_phase == 0:
-            # Phase 1: 1-3m
-            min_dist, max_dist = 1.0, 3.0
+            # Phase 1: 0.5-2m (reduced from 1-3m for easier initial learning)
+            min_dist, max_dist = 0.5, 2.0
         elif self.curriculum_phase == 1:
-            # Phase 2: 3-7m
-            min_dist, max_dist = 3.0, 7.0
+            # Phase 2: 1.5-4m (reduced from 3-7m)
+            min_dist, max_dist = 1.5, 4.0
         else:
-            # Phase 3: 5-10m
-            min_dist, max_dist = 5.0, 10.0
+            # Phase 3: 3-8m (reduced from 5-10m)
+            min_dist, max_dist = 3.0, 8.0
 
         # Sample distance and angle
         num_envs = len(env_ids)

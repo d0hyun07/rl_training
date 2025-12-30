@@ -22,6 +22,7 @@ def progress_to_goal(
     
     This reward encourages the robot to reduce the distance to the goal.
     It is computed as the negative change in distance (positive when getting closer).
+    Enhanced with distance-based shaping for better learning signal.
     
     Args:
         env: The environment instance
@@ -55,6 +56,18 @@ def progress_to_goal(
         # First step, no progress yet
         progress = torch.zeros_like(current_distance)
     
+    # Add distance-based shaping reward: closer to goal = higher reward
+    # This provides a stronger learning signal even when progress is small
+    # Scale: exp(-distance / scale^2) where scale = 2.0m
+    # This gives significant reward when within 2m of goal
+    distance_scale = 2.0
+    distance_reward = torch.exp(-current_distance / (distance_scale ** 2))
+    # Normalize to similar scale as progress (multiply by scale factor)
+    distance_reward = distance_reward * 0.1  # Scale factor to balance with progress
+    
+    # Combine progress and distance-based reward
+    total_progress = progress + distance_reward
+    
     # Store current distance for next step (ensure it's finite)
     env._prev_distance_to_goal = torch.where(
         torch.isfinite(current_distance), 
@@ -63,14 +76,14 @@ def progress_to_goal(
     )
     
     # Final check: replace any nan/inf with zero
-    progress = torch.where(torch.isfinite(progress), progress, torch.zeros_like(progress))
+    total_progress = torch.where(torch.isfinite(total_progress), total_progress, torch.zeros_like(total_progress))
     
-    return progress
+    return total_progress
 
 
 def goal_reached_bonus(
     env: ManagerBasedRLEnv,
-    threshold: float = 1.0,
+    threshold: float = 0.5,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     command_name: str = "goal_command",
 ) -> torch.Tensor:
@@ -78,7 +91,7 @@ def goal_reached_bonus(
     
     Args:
         env: The environment instance
-        threshold: Distance threshold for goal reached (meters)
+        threshold: Distance threshold for goal reached (meters) - reduced to 0.5m for easier learning
         asset_cfg: Configuration for the robot asset
         command_name: Name of the goal command
         
